@@ -3,6 +3,7 @@
 #include "Camera.hpp"
 #include "WifiManager.hpp"
 
+// Объявление переменных управление WiFi, камерой и двигателем
 WifiManager wifi;
 Camera camera;
 DriverManager driver;
@@ -22,12 +23,15 @@ void setup() {
   Serial.println("Разрешение: 640x480 VGA");
   Serial.printf("FPS: примерно %d\n", 1000 / Camera::captureInterval);
 
+  // Конфигурация камеры
   camera.cameraConfig();
 
   Serial.println("=== Инициализация Wi-Fi ===");
+  // Подключение к Wi-Fi
   wifi.connect();
 
   Serial.println("=== Инициализация двигателей ===");
+  // Инициализация двигателей (пинов, отвечающих за их управление)
   driver.init();
 }
 
@@ -39,15 +43,19 @@ void cameraHandler()
   if (currentTime - lastCaptureTime >= Camera::captureInterval) {
     lastCaptureTime = currentTime;
     
+    // Получение изображения с камеры
     camera_fb_t* fb = camera.getCupture();
+    // Если изображения нет, то выходим из функции
     if (!fb) {
       Serial.println("Ошибка захвата кадра");
       return;
     }
-    
+
+    // Увеличение счетчика кадров
     frameCount++;
 
     wifi.frameCount = frameCount;
+    // Отправка изображения
     wifi.process(WifiManager::SendFormat::CAMERA_DATA, fb);
     
     // ОБЯЗАТЕЛЬНО освобождаем буфер
@@ -62,12 +70,20 @@ void cameraHandler()
   }
 }
 
+void driverHandler()
+{
+  // Проверяем, пришла ли новая команда с сервера на управление двигателем
+  if (wifi.isNeedUpdate()) {
+    // Получаем команду
+    WifiManager::RobotCommands commands = wifi.getCommand();
+    // Управляем моторами
+    driver.move(commands.leftMotor, commands.rightMotor);
+  }
+}
+
 void loop() {
 
+  // Обработчики управлением камерой и двигателями
   cameraHandler();
-
-  WifiManager::RobotCommands commands = wifi.getCommand();
-  driver.move(commands.leftMotor, commands.rightMotor);
-
-  // delay(5000);
+  driverHandler();
 }

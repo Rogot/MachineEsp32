@@ -1,46 +1,38 @@
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 import cgi
-import os
 import json
 import threading
 import time
 from urllib.parse import parse_qs, urlparse
-
-SAVE_DIR = "captured_frames"
-if not os.path.exists(SAVE_DIR):
-    os.makedirs(SAVE_DIR)
+from io import BytesIO
 
 class RobotController:
     """Класс для управления роботом"""
     def __init__(self):
         self.commands = {
-            "left": 0,    # -1 назад, 0 стоп, 1 вперед
+            "left": 0,
             "right": 0,
-            "camera": 0,  # 1 вкл, 0 выкл
-            "interval": 100  # мс между кадрами
+            "camera": 1,
+            "interval": 1000
         }
         self.lock = threading.Lock()
     
     def set_motors(self, left, right):
-        """Установка скорости моторов"""
         with self.lock:
             self.commands["left"] = max(-1, min(1, left))
             self.commands["right"] = max(-1, min(1, right))
     
     def set_camera(self, enabled, interval=1000):
-        """Управление камерой"""
         with self.lock:
             self.commands["camera"] = 1 if enabled else 0
             self.commands["interval"] = max(100, min(5000, interval))
     
     def get_commands_string(self):
-        """Получение команд в формате для ESP32"""
         with self.lock:
             return f"LEFT:{self.commands['left']},RIGHT:{self.commands['right']},CAM:{self.commands['camera']},INTERVAL:{self.commands['interval']}"
     
     def get_commands_json(self):
-        """Получение команд в JSON формате"""
         with self.lock:
             return json.dumps(self.commands)
 
@@ -48,9 +40,12 @@ class ESP32Handler(BaseHTTPRequestHandler):
     frame_count = 0
     start_time = time.time()
     lock = threading.Lock()
-    
-    # Создаем глобальный контроллер робота
     robot = RobotController()
+    
+    # Храним последний кадр в памяти
+    latest_frame = None
+    latest_frame_time = None
+    frame_lock = threading.Lock()
     
     def do_GET(self):
         """Обработка GET запросов"""
@@ -73,10 +68,19 @@ class ESP32Handler(BaseHTTPRequestHandler):
                 uptime = time.time() - self.start_time
                 fps = self.frame_count / uptime if uptime > 0 else 0
             
+            with self.frame_lock:
+                has_frame = self.latest_frame is not None
+                frame_time = self.latest_frame_time
+            
             status = {
                 "frames_received": self.frame_count,
                 "uptime_seconds": round(uptime, 1),
                 "average_fps": round(fps, 2),
+                "latest_frame": {
+                    "available": has_frame,
+                    "timestamp": frame_time.strftime('%H:%M:%S.%f') if frame_time else None,
+                    "size_bytes": len(self.latest_frame) if has_frame else 0
+                },
                 "robot_commands": json.loads(self.robot.get_commands_json())
             }
             
@@ -89,26 +93,28 @@ class ESP32Handler(BaseHTTPRequestHandler):
         elif path == '/control':
             # Веб-интерфейс управления
             self.send_response(200)
-            self.send_header('Content-type', 'text/html')
+            self.send_header('Content-type', 'text/html; charset=utf-8')
             self.end_headers()
             self.wfile.write(self.get_control_page().encode('utf-8'))
             
-        elif path == '/latest':
-            # Последний кадр
-            files = sorted(os.listdir(SAVE_DIR))
-            if files:
-                latest = files[-1]
-                with open(f"{SAVE_DIR}/{latest}", 'rb') as f:
+        elif path == '/latest' or path == '/video':
+            # Отдаем последний кадр из памяти
+            with self.frame_lock:
+                if self.latest_frame:
                     self.send_response(200)
                     self.send_header('Content-type', 'image/jpeg')
+                    self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+                    self.send_header('Pragma', 'no-cache')
+                    self.send_header('Expires', '0')
                     self.end_headers()
-                    self.wfile.write(f.read())
-            else:
-                self.send_response(404)
-                self.end_headers()
-                
+                    self.wfile.write(self.latest_frame)
+                else:
+                    self.send_response(404)
+                    self.send_header('Content-type', 'text/plain')
+                    self.end_headers()
+                    self.wfile.write(b"No frame available yet")
+                    
         elif path == '/api/move':
-            # API для движения: /api/move?left=1&right=1
             params = parse_qs(parsed_path.query)
             left = int(params.get('left', [0])[0])
             right = int(params.get('right', [0])[0])
@@ -117,11 +123,11 @@ class ESP32Handler(BaseHTTPRequestHandler):
             
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps({"status": "ok", "left": left, "right": right}).encode('utf-8'))
             
         elif path == '/api/camera':
-            # API для камеры: /api/camera?enabled=1&interval=500
             params = parse_qs(parsed_path.query)
             enabled = int(params.get('enabled', [1])[0])
             interval = int(params.get('interval', [1000])[0])
@@ -130,36 +136,58 @@ class ESP32Handler(BaseHTTPRequestHandler):
             
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps({"status": "ok", "camera": enabled, "interval": interval}).encode('utf-8'))
             
         else:
             # Главная страница
             self.send_response(200)
-            self.send_header('Content-type', 'text/html')
+            self.send_header('Content-type', 'text/html; charset=utf-8')
             self.end_headers()
             html = """
-            <h1>ESP32-CAM Robot Server</h1>
-            <ul>
-                <li><a href="/control">Панель управления</a></li>
-                <li><a href="/status">Статус робота (JSON)</a></li>
-                <li><a href="/latest">Последний кадр</a></li>
-            </ul>
-            <h2>API:</h2>
-            <ul>
-                <li>GET /api/move?left=1&right=1</li>
-                <li>GET /api/camera?enabled=1&interval=500</li>
-                <li>GET /getdata - команды для ESP32</li>
-            </ul>
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <title>ESP32-CAM Robot Server</title>
+                <style>
+                    body { font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }
+                    .container { max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+                    h1 { color: #333; }
+                    ul { line-height: 1.8; }
+                    a { color: #007bff; text-decoration: none; }
+                    a:hover { text-decoration: underline; }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h1>🤖 ESP32-CAM Robot Server</h1>
+                    <p>Сервер работает. Изображения не сохраняются на диск.</p>
+                    <ul>
+                        <li><a href="/control">🎮 Панель управления</a></li>
+                        <li><a href="/status">📊 Статус робота (JSON)</a></li>
+                        <li><a href="/latest">📷 Последний кадр</a></li>
+                    </ul>
+                    <h2>API:</h2>
+                    <ul>
+                        <li><code>GET /api/move?left=1&right=1</code> - движение</li>
+                        <li><code>GET /api/camera?enabled=1&interval=500</code> - камера</li>
+                        <li><code>GET /getdata</code> - команды для ESP32</li>
+                    </ul>
+                </div>
+            </body>
+            </html>
             """
             self.wfile.write(html.encode('utf-8'))
     
     def do_POST(self):
-        """Прием кадров от ESP32-CAM"""
+        """Прием кадров от ESP32-CAM (без сохранения на диск)"""
         content_type = self.headers.get('Content-Type')
         
         if content_type and 'multipart/form-data' in content_type:
             try:
+                # Парсим multipart данные
                 form = cgi.FieldStorage(
                     fp=self.rfile,
                     headers=self.headers,
@@ -168,27 +196,39 @@ class ESP32Handler(BaseHTTPRequestHandler):
                 
                 if 'imageFile' in form:
                     file_item = form['imageFile']
-                    filename = f"{SAVE_DIR}/frame_{datetime.now().strftime('%H%M%S_%f')}.jpg"
                     
-                    with open(filename, 'wb') as f:
-                        f.write(file_item.file.read())
+                    # Читаем изображение в память
+                    frame_data = file_item.file.read()
                     
+                    # Сохраняем в памяти (заменяем предыдущий кадр)
+                    with self.frame_lock:
+                        self.latest_frame = frame_data
+                        self.latest_frame_time = datetime.now()
+                    
+                    # Увеличиваем счетчик
                     with self.lock:
                         self.frame_count += 1
+                        count = self.frame_count
                     
+                    # Отправляем ответ
                     self.send_response(200)
                     self.send_header('Content-type', 'text/plain')
                     self.end_headers()
-                    self.wfile.write(f"OK frame={self.frame_count}".encode('utf-8'))
+                    self.wfile.write(f"OK frame={count}".encode('utf-8'))
+                    
+                    # Логируем каждый 100-й кадр
+                    if count % 100 == 0:
+                        print(f"📸 Получено кадров: {count}, размер: {len(frame_data)} байт")
                 else:
                     self.send_response(400)
                     self.end_headers()
                     self.wfile.write(b"ERROR: No imageFile field")
                     
             except Exception as e:
-                print(f"Ошибка обработки: {e}")
+                print(f"❌ Ошибка обработки кадра: {e}")
                 self.send_response(500)
                 self.end_headers()
+                self.wfile.write(f"ERROR: {str(e)}".encode('utf-8'))
                 
         else:
             # Обработка текстовых данных (телеметрия)
@@ -214,23 +254,154 @@ class ESP32Handler(BaseHTTPRequestHandler):
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <title>Управление роботом</title>
             <style>
-                body {{ font-family: Arial, sans-serif; margin: 20px; background: #f0f0f0; }}
-                .container {{ max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; }}
-                h1 {{ color: #333; }}
-                .controls {{ display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin: 20px 0; }}
-                .control-group {{ background: #f9f9f9; padding: 15px; border-radius: 5px; }}
-                button {{ 
-                    padding: 10px 20px; margin: 5px; font-size: 16px; 
-                    border: none; border-radius: 5px; cursor: pointer; 
-                    background: #007bff; color: white; 
+                * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+                body {{ 
+                    font-family: 'Segoe UI', Arial, sans-serif; 
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    min-height: 100vh;
+                    padding: 20px;
                 }}
-                button:hover {{ background: #0056b3; }}
-                button.stop {{ background: #dc3545; }}
-                button.stop:hover {{ background: #c82333; }}
-                .status {{ margin-top: 20px; padding: 10px; background: #e9ecef; border-radius: 5px; }}
-                .camera-view {{ margin-top: 20px; text-align: center; }}
-                .camera-view img {{ max-width: 100%; border: 2px solid #ddd; border-radius: 5px; }}
-                .slider {{ width: 100%; }}
+                .container {{ 
+                    max-width: 900px; 
+                    margin: 0 auto; 
+                    background: white; 
+                    padding: 30px; 
+                    border-radius: 15px; 
+                    box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+                }}
+                h1 {{ color: #333; margin-bottom: 20px; text-align: center; }}
+                .controls {{ 
+                    display: grid; 
+                    grid-template-columns: 1fr 1fr; 
+                    gap: 20px; 
+                    margin: 20px 0; 
+                }}
+                .control-group {{ 
+                    background: #f8f9fa; 
+                    padding: 20px; 
+                    border-radius: 10px; 
+                    border: 1px solid #dee2e6;
+                }}
+                .control-group h3 {{ margin-bottom: 15px; color: #495057; }}
+                
+                /* Джойстик управления */
+                .joystick {{
+                    display: grid;
+                    grid-template-columns: 80px 80px 80px;
+                    grid-template-rows: 80px 80px 80px;
+                    gap: 5px;
+                    justify-content: center;
+                    margin: 10px 0;
+                }}
+                .joy-btn {{
+                    width: 80px;
+                    height: 80px;
+                    border: 2px solid #007bff;
+                    background: #e7f1ff;
+                    color: #007bff;
+                    font-size: 28px;
+                    border-radius: 12px;
+                    cursor: pointer;
+                    transition: all 0.2s;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                }}
+                .joy-btn:hover {{ background: #007bff; color: white; transform: scale(1.05); }}
+                .joy-btn:active {{ transform: scale(0.95); }}
+                .joy-btn.stop {{ 
+                    background: #dc3545; 
+                    color: white; 
+                    border-color: #dc3545;
+                    font-size: 20px;
+                    font-weight: bold;
+                }}
+                .joy-btn.stop:hover {{ background: #c82333; }}
+                .joy-center {{ grid-column: 2; grid-row: 2; }}
+                
+                /* Слайдеры и переключатели */
+                .camera-controls {{
+                    display: flex;
+                    flex-direction: column;
+                    gap: 15px;
+                }}
+                .toggle-label {{
+                    display: flex;
+                    align-items: center;
+                    gap: 10px;
+                    cursor: pointer;
+                    font-size: 16px;
+                }}
+                .toggle-label input[type="checkbox"] {{
+                    width: 20px;
+                    height: 20px;
+                    cursor: pointer;
+                }}
+                .slider-container {{
+                    display: flex;
+                    flex-direction: column;
+                    gap: 5px;
+                }}
+                .slider {{
+                    width: 100%;
+                    height: 8px;
+                    border-radius: 5px;
+                    background: #ddd;
+                    outline: none;
+                    -webkit-appearance: none;
+                }}
+                .slider::-webkit-slider-thumb {{
+                    -webkit-appearance: none;
+                    appearance: none;
+                    width: 22px;
+                    height: 22px;
+                    border-radius: 50%;
+                    background: #007bff;
+                    cursor: pointer;
+                }}
+                
+                /* Видео */
+                .camera-view {{
+                    margin-top: 20px;
+                    text-align: center;
+                    background: #000;
+                    border-radius: 10px;
+                    overflow: hidden;
+                    min-height: 300px;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                }}
+                .camera-view img {{
+                    max-width: 100%;
+                    max-height: 500px;
+                }}
+                .no-signal {{
+                    color: #666;
+                    font-size: 18px;
+                    padding: 50px;
+                }}
+                
+                /* Статус */
+                .status {{
+                    margin-top: 20px;
+                    padding: 15px;
+                    background: #e9ecef;
+                    border-radius: 8px;
+                    font-family: monospace;
+                    font-size: 14px;
+                }}
+                
+                /* Индикатор FPS */
+                .fps-counter {{
+                    display: inline-block;
+                    background: #28a745;
+                    color: white;
+                    padding: 3px 8px;
+                    border-radius: 4px;
+                    font-size: 12px;
+                    margin-left: 10px;
+                }}
             </style>
         </head>
         <body>
@@ -239,58 +410,93 @@ class ESP32Handler(BaseHTTPRequestHandler):
                 
                 <div class="controls">
                     <div class="control-group">
-                        <h3>Движение</h3>
-                        <button onclick="sendCommand('move?left=1&right=1')">⬆️ Вперед</button><br>
-                        <button onclick="sendCommand('move?left=-1&right=1')">↪️ Влево</button>
-                        <button onclick="sendCommand('move?left=0&right=0')" class="stop">⏹️ Стоп</button>
-                        <button onclick="sendCommand('move?left=1&right=-1')">↩️ Вправо</button><br>
-                        <button onclick="sendCommand('move?left=-1&right=-1')">⬇️ Назад</button>
+                        <h3>🎮 Джойстик движения</h3>
+                        <div class="joystick">
+                            <div></div>
+                            <button class="joy-btn" onclick="move(1, 1)" title="Вперед (↑)">⬆️</button>
+                            <div></div>
+                            
+                            <button class="joy-btn" onclick="move(-1, 1)" title="Влево (←)">⬅️</button>
+                            <button class="joy-btn stop joy-center" onclick="move(0, 0)" title="Стоп (Пробел)">■</button>
+                            <button class="joy-btn" onclick="move(1, -1)" title="Вправо (→)">➡️</button>
+                            
+                            <div></div>
+                            <button class="joy-btn" onclick="move(-1, -1)" title="Назад (↓)">⬇️</button>
+                            <div></div>
+                        </div>
                     </div>
                     
                     <div class="control-group">
-                        <h3>Камера</h3>
-                        <label>
-                            <input type="checkbox" id="cameraToggle" 
-                                   {'checked' if commands['camera'] == 1 else ''} 
-                                   onchange="toggleCamera()">
-                            Включить камеру
-                        </label>
-                        <br><br>
-                        <label>Интервал кадров (мс):</label>
-                        <input type="range" class="slider" id="intervalSlider" 
-                               min="100" max="5000" value="{commands['interval']}" 
-                               onchange="updateInterval(this.value)">
-                        <span id="intervalValue">{commands['interval']} мс</span>
+                        <h3>📷 Настройки камеры</h3>
+                        <div class="camera-controls">
+                            <label class="toggle-label">
+                                <input type="checkbox" id="cameraToggle" 
+                                       {'checked' if commands['camera'] == 1 else ''} 
+                                       onchange="toggleCamera()">
+                                <strong>Камера {'включена' if commands['camera'] == 1 else 'выключена'}</strong>
+                            </label>
+                            
+                            <div class="slider-container">
+                                <label>Интервал кадров: <strong><span id="intervalValue">{commands['interval']}</span> мс</strong></label>
+                                <input type="range" class="slider" id="intervalSlider" 
+                                       min="100" max="5000" value="{commands['interval']}" 
+                                       oninput="updateInterval(this.value)">
+                                <small style="color: #666;">100 мс ≈ 10 FPS | 1000 мс = 1 FPS</small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="camera-view">
+                    <img id="cameraFeed" src="/latest" alt="Видео с камеры" 
+                         onerror="this.style.display='none'; document.getElementById('noSignal').style.display='block';"
+                         onload="this.style.display='block'; document.getElementById('noSignal').style.display='none';">
+                    <div id="noSignal" class="no-signal" style="display: none;">
+                        📡 Ожидание видеосигнала...
                     </div>
                 </div>
                 
                 <div class="status">
-                    <h3>Текущее состояние:</h3>
-                    <p id="status">Левый мотор: {commands['left']}, Правый мотор: {commands['right']}</p>
-                    <p>Камера: {'Включена' if commands['camera'] == 1 else 'Выключена'}</p>
-                </div>
-                
-                <div class="camera-view">
-                    <h3>Видео с камеры:</h3>
-                    <img id="cameraFeed" src="/latest" alt="Camera feed">
+                    <strong>Состояние:</strong> 
+                    Левый мотор: <span id="leftMotor">{commands['left']}</span> | 
+                    Правый мотор: <span id="rightMotor">{commands['right']}</span>
+                    <span class="fps-counter" id="fpsCounter">FPS: --</span>
                 </div>
             </div>
             
             <script>
-                // Обновление изображения с камеры
-                setInterval(() => {{
-                    document.getElementById('cameraFeed').src = '/latest?' + new Date().getTime();
-                }}, {commands['interval']});
+                let lastFrameTime = Date.now();
+                let frameCount = 0;
                 
-                // Отправка команд движения
-                async function sendCommand(cmd) {{
+                // Обновление видео с камеры
+                function updateCamera() {{
+                    const img = document.getElementById('cameraFeed');
+                    img.src = '/latest?' + new Date().getTime();
+                    
+                    // Подсчет FPS
+                    frameCount++;
+                    const now = Date.now();
+                    if (now - lastFrameTime >= 1000) {{
+                        const fps = Math.round(frameCount / ((now - lastFrameTime) / 1000));
+                        document.getElementById('fpsCounter').textContent = 'FPS: ' + fps;
+                        frameCount = 0;
+                        lastFrameTime = now;
+                    }}
+                }}
+                
+                // Запускаем обновление камеры
+                const cameraInterval = {commands['interval']};
+                setInterval(updateCamera, cameraInterval);
+                
+                // Функция движения
+                async function move(left, right) {{
                     try {{
-                        const response = await fetch('/api/' + cmd);
+                        const response = await fetch(`/api/move?left=${{left}}&right=${{right}}`);
                         const data = await response.json();
-                        document.getElementById('status').innerHTML = 
-                            `Левый мотор: ${{data.left}}, Правый мотор: ${{data.right}}`;
+                        document.getElementById('leftMotor').textContent = data.left;
+                        document.getElementById('rightMotor').textContent = data.right;
                     }} catch (error) {{
-                        console.error('Error:', error);
+                        console.error('Ошибка:', error);
                     }}
                 }}
                 
@@ -302,7 +508,7 @@ class ESP32Handler(BaseHTTPRequestHandler):
                 }}
                 
                 async function updateInterval(value) {{
-                    document.getElementById('intervalValue').textContent = value + ' мс';
+                    document.getElementById('intervalValue').textContent = value;
                     const enabled = document.getElementById('cameraToggle').checked ? 1 : 0;
                     await fetch(`/api/camera?enabled=${{enabled}}&interval=${{value}}`);
                 }}
@@ -310,14 +516,34 @@ class ESP32Handler(BaseHTTPRequestHandler):
                 // Управление с клавиатуры
                 document.addEventListener('keydown', (event) => {{
                     switch(event.key) {{
-                        case 'ArrowUp': sendCommand('move?left=1&right=1'); break;
-                        case 'ArrowDown': sendCommand('move?left=-1&right=-1'); break;
-                        case 'ArrowLeft': sendCommand('move?left=-1&right=1'); break;
-                        case 'ArrowRight': sendCommand('move?left=1&right=-1'); break;
+                        case 'ArrowUp': 
+                            event.preventDefault();
+                            move(1, 1); 
+                            break;
+                        case 'ArrowDown': 
+                            event.preventDefault();
+                            move(-1, -1); 
+                            break;
+                        case 'ArrowLeft': 
+                            event.preventDefault();
+                            move(-1, 1); 
+                            break;
+                        case 'ArrowRight': 
+                            event.preventDefault();
+                            move(1, -1); 
+                            break;
                         case ' ': 
                             event.preventDefault();
-                            sendCommand('move?left=0&right=0'); 
+                            move(0, 0); 
                             break;
+                    }}
+                }});
+                
+                // Отпускание клавиш - стоп
+                document.addEventListener('keyup', (event) => {{
+                    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) {{
+                        event.preventDefault();
+                        move(0, 0);
                     }}
                 }});
             </script>
@@ -325,30 +551,20 @@ class ESP32Handler(BaseHTTPRequestHandler):
         </html>
         """
 
-def cleanup_old_frames():
-    """Очистка старых кадров"""
-    while True:
-        time.sleep(60)
-        files = sorted(os.listdir(SAVE_DIR))
-        if len(files) > 100:
-            for old_file in files[:-100]:
-                os.remove(f"{SAVE_DIR}/{old_file}")
-            print(f"🧹 Очищено {len(files) - 100} старых кадров")
-
 def main():
-    cleanup_thread = threading.Thread(target=cleanup_old_frames, daemon=True)
-    cleanup_thread.start()
-    
     print("=" * 60)
     print("🤖 Сервер управления роботом ESP32-CAM")
     print("=" * 60)
+    print("\n⚡ Изображения НЕ сохраняются на диск (только в RAM)")
     print("\nУправление:")
-    print("  Веб-интерфейс: http://localhost:8080/control")
-    print("  API движения:  http://localhost:8080/api/move?left=1&right=1")
-    print("  API камеры:    http://localhost:8080/api/camera?enabled=1&interval=500")
-    print("  Статус:        http://localhost:8080/status")
-    print("\nУправление с клавиатуры на странице /control:")
-    print("  Стрелки - движение")
+    print("  🎮 Веб-интерфейс: http://localhost:8080/control")
+    print("  📷 Видеопоток:    http://localhost:8080/latest")
+    print("  📊 Статус:        http://localhost:8080/status")
+    print("\nAPI команды:")
+    print("  GET /api/move?left=1&right=1")
+    print("  GET /api/camera?enabled=1&interval=500")
+    print("\nГорячие клавиши на странице /control:")
+    print("  ↑↓←→ - движение")
     print("  Пробел - стоп")
     print("=" * 60)
     

@@ -11,10 +11,12 @@ private:
   #define STATUS_LED 33 
 
 public:
+  // Конструктор класса DriverManager    
   DriverManager()
   {
   }
 
+  // Настройка пинов управления двигателями
   void init()
   {
     pinMode(RIGHT_IN1, OUTPUT); 
@@ -24,6 +26,7 @@ public:
     move(0, 0);
   }
 
+  // Управление двигателями
   void move(int leftDir, int rightDir)
   {
     // 1) больше 1 - движение вперед
@@ -31,6 +34,8 @@ public:
     // 3) 0 - остановка
 
     // Движение вперед (ЛЕВЫЙ)
+    // Пример: если leftDir > 0, то LEFT_IN3 HIGH, иначе LOW
+    // Остальное по аналогии
     digitalWrite(LEFT_IN3,  leftDir > 0 ? HIGH : LOW);
     // Движение назад (ЛЕВЫЙ)
     digitalWrite(LEFT_IN4,  leftDir < 0 ? HIGH : LOW);

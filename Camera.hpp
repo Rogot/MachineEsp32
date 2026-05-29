@@ -32,12 +32,14 @@ public:
   static const int captureInterval = 100; // Интервал между кадрами в мс (10 FPS)
 
 public:
+  // Конструктор класса Camera 
   Camera() 
   {
   }
 
   void cameraConfig()
   {
+    // Настройка пинов и параметров камеры
     camera_config_t config;
     config.ledc_channel = LEDC_CHANNEL_0;
     config.ledc_timer = LEDC_TIMER_0;
@@ -76,6 +78,7 @@ public:
     Serial.println("Camera initialized!");
   }
   
+  // Получение изображения с камеры с помощью функции
   camera_fb_t* getCupture()
   {
     return esp_camera_fb_get();

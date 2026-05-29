@@ -13,14 +13,23 @@ private:
     // const char* ssid = "ИМЯ_ВАШЕЙ_СЕТИ";      // Название Wi-Fi сети
     // const char* password = "ПАРОЛЬ_СЕТИ";      // Пароль от Wi-Fi
 
-    const char* ssid = "techDesignPr";      // Название Wi-Fi сети
-    const char* password = "Vozneslab";      // Пароль от Wi-Fi
-    // const char* ssid = "Prokuratura";      // Название Wi-Fi сети
-    // const char* password = "femida19052002";      // Пароль от Wi-Fi
+    // const char* ssid = "techDesignPr";      // Название Wi-Fi сети
+    // const char* password = "Vozneslab";      // Пароль от Wi-Fi
+    const char* ssid = "Prokuratura";      // Название Wi-Fi сети
+    const char* password = "femida19052002";      // Пароль от Wi-Fi
 
     // Адрес сервера
-    const char* serverIP = "192.168.14.183"; // Адрес вашего сервера
-    // const char* serverIP = "192.168.31.20";
+    // const char* serverIP = "192.168.14.183"; // Адрес вашего сервера
+    const char* serverIP = "192.168.31.20";
+
+public:
+    // Переменные для хранения команд с сервера
+    struct RobotCommands {
+        int leftMotor = 0;   // -1 назад, 0 стоп, 1 вперед
+        int rightMotor = 0;  // -1 назад, 0 стоп, 1 вперед
+        bool cameraEnabled = false;
+        int cameraInterval = 100; // мс между кадрами
+    };
 
 public:
     enum class SendFormat {
@@ -36,7 +45,9 @@ public:
     {
         if (WiFi.status() == WL_CONNECTED) {
             Serial.println("Все еще подключены к Wi-Fi");
-            send(aFormat, aFb);
+            if (commands.cameraEnabled) {
+                send(aFormat, aFb);
+            }
             // blinkLED(2, 200);
 
             request();
@@ -49,7 +60,15 @@ public:
     void request()
     {
         Serial.println("\nЗАПРАШИВАЮ ДАННЫЕ С СЕРВЕРА...");
-        requestDataFromServer();
+        String response =  requestDataFromServer();
+        if (response.length() > 0) {
+            parseServerCommands(response);
+        }
+    }
+
+    RobotCommands getCommand()
+    {
+        return commands;
     }
 
     void send(SendFormat aFormat, camera_fb_t* aFb = nullptr)
@@ -91,10 +110,10 @@ private:
     }
 
     // Прием всех данных с сервера
-    void requestDataFromServer()
+    String requestDataFromServer()
     {
         if (!wifiCheck()) {
-            return;
+            return String();
         }
         
         HTTPClient http;
@@ -105,24 +124,18 @@ private:
         
         int httpCode = http.GET();  // GET запрос
         
+        String response = http.getString();
+
         if(httpCode > 0) {
             Serial.print("Данные получены! Код: ");
             Serial.println(httpCode);
-            
-            String response = http.getString();
-            
-            Serial.println("\nДАННЫЕ С СЕРВЕРА:");
-            Serial.println("=====================");
-            
-            // Выводим красиво
-            Serial.println(response);
-            
         } else {
             Serial.print("Ошибка запроса: ");
             Serial.println(httpCode);
         }
         
         http.end();
+        return response;
     }
 
     void sendCapture(camera_fb_t* aFb)
@@ -274,6 +287,37 @@ private:
             digitalWrite(LED_PIN, LOW); // Выключаем светодиод
         }
     }
+
+    // Парсинг команд с сервера
+    void parseServerCommands(String response) {
+        // Ожидаем формат: "LEFT:1,RIGHT:1,CAM:1,INTERVAL:500"
+        int leftIdx = response.indexOf("LEFT:");
+        int rightIdx = response.indexOf("RIGHT:");
+        int camIdx = response.indexOf("CAM:");
+        int intervalIdx = response.indexOf("INTERVAL:");
+        
+        if (leftIdx >= 0) {
+            commands.leftMotor = response.substring(leftIdx + 5, response.indexOf(',', leftIdx)).toInt();
+        }
+        if (rightIdx >= 0) {
+            int endIdx = response.indexOf(',', rightIdx);
+            if (endIdx < 0) endIdx = response.length();
+            commands.rightMotor = response.substring(rightIdx + 6, endIdx).toInt();
+        }
+        if (camIdx >= 0) {
+            commands.cameraEnabled = (response.substring(camIdx + 4, response.indexOf(',', camIdx)).toInt() == 1);
+        }
+        if (intervalIdx >= 0) {
+            commands.cameraInterval = response.substring(intervalIdx + 9).toInt();
+        }
+        
+        Serial.printf("Команды: L=%d, R=%d, CAM=%d, INT=%d\n", 
+                        commands.leftMotor, commands.rightMotor, 
+                        commands.cameraEnabled, commands.cameraInterval);
+    }
+
+private:
+    RobotCommands commands;
 };
 
 #endif /// WIFIMANAGER_HPP_

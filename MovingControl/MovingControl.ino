@@ -1,9 +1,11 @@
 // Подключаем необходимые библиотеки
+#include "DriverManager.hpp"
 #include "Camera.hpp"
 #include "WifiManager.hpp"
 
 WifiManager wifi;
 Camera camera;
+DriverManager driver;
 
 unsigned long lastCaptureTime = 0;
 int frameCount = 0;
@@ -21,16 +23,16 @@ void setup() {
   Serial.printf("FPS: примерно %d\n", 1000 / Camera::captureInterval);
 
   camera.cameraConfig();
+
+  Serial.println("=== Инициализация Wi-Fi ===");
   wifi.connect();
+
+  Serial.println("=== Инициализация двигателей ===");
+  driver.init();
 }
 
-void loop() {
-  // Основной цикл
-  // Здесь вы можете добавить код для работы с камерой, например:
-  // - Захват изображения
-  // - Отправка по Wi-Fi
-  // - и т.д.
-
+void cameraHandler()
+{
   unsigned long currentTime = millis();
 
   // Захват кадра по таймеру
@@ -58,6 +60,14 @@ void loop() {
       Serial.printf("Свободная PSRAM: %d байт\n\n", ESP.getFreePsram());
     }
   }
+}
 
-  delay(5000);
+void loop() {
+
+  cameraHandler();
+
+  WifiManager::RobotCommands commands = wifi.getCommand();
+  driver.move(commands.leftMotor, commands.rightMotor);
+
+  // delay(5000);
 }

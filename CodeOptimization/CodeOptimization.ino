@@ -15,10 +15,6 @@ int frameCount = 0;
 // Мьютекс для доступа к WiFi (разделяемый ресурс)
 SemaphoreHandle_t wifiMutex = NULL;
 
-// Прототипы задач
-void taskDriver(void *pvParameters);
-void taskCamera(void *pvParameters);
-
 // Задача управления моторами (ядро 0, приоритет 3)
 void taskDriver(void *pvParameters) {
   while (true) {
@@ -73,14 +69,6 @@ void taskCamera(void *pvParameters) {
     }
     // ОБЯЗАТЕЛЬНО освобождаем буфер
     esp_camera_fb_return(fb);
-      
-    // Статистика
-    if (frameCount % 50 == 0) {
-      Serial.printf("\nСтатистика: отправлено %d кадров\n", frameCount);
-      Serial.printf("Свободная куча: %d байт\n", ESP.getFreeHeap());
-      Serial.printf("Свободная PSRAM: %d байт\n\n", ESP.getFreePsram());
-    }
-
     // Задержка между кадрами (10 fps)
     vTaskDelay(frameInterval);
   }
@@ -143,7 +131,6 @@ void setup() {
   };
   esp_task_wdt_init(&wdt_config);
   esp_task_wdt_add(NULL);
-  
 }
 
 void loop() {

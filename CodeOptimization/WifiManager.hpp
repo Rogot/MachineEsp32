@@ -73,7 +73,6 @@ public:
         Serial.println("\nЗАПРАШИВАЮ ДАННЫЕ С СЕРВЕРА...");
         // Получаем ответ с сервера
         String response =  requestDataFromServer();
-        // String response = requestDataFromServerNonBlocking();
         // Если ответ есть, то мы его обрабатываем
         if (response.length() > 0) {
             parseServerCommands(response);
@@ -171,46 +170,6 @@ private:
         
         http.end();
         // Возвращаем запрос
-        return response;
-    }
-
-    String requestDataFromServerNonBlocking() {
-        const char* serverHost = serverIP;
-        const int serverPort = 8080;
-
-        WiFiClient client;
-        // Устанавливаем ТАЙМАУТ ПОДКЛЮЧЕНИЯ - 50 миллисекунд!
-        client.setTimeout(50);
-
-        // Пытаемся подключиться
-        if (!client.connect(serverHost, serverPort)) {
-            // Если не удалось подключиться за 50 мс, просто выходим
-            Serial.println("Ошибка запроса");
-            return String();
-        }
-
-        // Формируем и отправляем GET-запрос
-        client.print(String("GET /getdata HTTP/1.1\r\n") +
-                    "Host: " + serverHost + "\r\n" +
-                    "Connection: close\r\n\r\n");
-
-        // Ждем начала ответа, но не дольше 50 мс
-        unsigned long startTime = millis();
-        while (!client.available() && (millis() - startTime) < 50) {
-            delay(1);
-        }
-
-        // Если ответа нет, закрываем соединение и выходим
-        if (!client.available()) {
-            client.stop();
-            return String();
-        }
-
-        // Читаем ответ сервера
-        String response = client.readStringUntil('\n');
-        Serial.println("!!!!Данные получены!!!!");
-        client.stop();
-
         return response;
     }
 
